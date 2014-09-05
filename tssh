@@ -1,0 +1,402 @@
+#!/bin/sh
+#
+# Multi threaded ssh of a large file to a destination. Uses checksums for 
+# incremental speedups on subsequent copies.
+# 
+#   $ tssh [-t x] [-u user] src host dest
+#   $ tssh [-t x] [-u user] src host:dest
+#   $ tssh [-t x] [-u user] src user@host:dest
+# 
+# Defaults to $DEF_THREADS threads. Options:
+# 
+#       -threads
+#       --threads
+#       -t  ... How many scp threads to run
+# 
+#       -quiet
+#       --quiet
+#       -q  ... Quiet, no logging to console
+# 
+#       -user
+#       --user
+#       -u  ... Username
+# 
+#       -debug
+#       --debug
+#       -d  ... Debug
+# 
+#       -help
+#       --help
+#       -h  ... Help
+# 
+#       -verify
+#       --verify
+#       -v  ... Check results
+# 
+# Example to copy bigfile to farawayhost with 20 concurrent ssh sessions!
+# 
+#   $ tssh -t 20 -d -v bigfile user@farawayhost:/full/path/to/file
+#
+# Neil McGill
+#
+PROG=tssh
+SUM=sha256sum
+SUM=md5sum
+DEF_THREADS=10
+SCP_OPTS="-p"
+SSH_OPTS="-q"
+HOST=
+
+#
+# End user options
+#
+OPT_THREADS=$DEF_THREADS
+OPT_LOG_TO_CONSOLE=1
+OPT_DEBUG=0
+OPT_USER=
+
+usage()
+{
+cat <<USAGE
+Multi threaded ssh of a large file to a destination. Uses checksums for 
+incremental speedups on subsequent copies.
+
+  $ tssh [-t x] [-u user] src host dest
+  $ tssh [-t x] [-u user] src host:dest
+  $ tssh [-t x] [-u user] src user@host:dest
+
+Defaults to $DEF_THREADS threads. Options:
+
+      -threads
+      --threads
+      -t  ... How many scp threads to run
+
+      -quiet
+      --quiet
+      -q  ... Quiet, no logging to console
+
+      -user
+      --user
+      -u  ... Username
+
+      -debug
+      --debug
+      -d  ... Debug
+
+      -help
+      --help
+      -h  ... Help
+
+      -verify
+      --verify
+      -v  ... Check results
+
+Example:
+
+  $ tssh -t 20 -d -v file admin@rtp-xdm-104:/auto/rtp-core-tftpboot/nmcgill/file
+USAGE
+}
+
+#
+# Bash wrapper
+#
+setenv() { eval $1='$2'; export $1; }
+
+#
+# Run a command on the remote host
+#
+remote_ssh()
+{
+    dbg "  ssh $SSH_OPTS $OPT_USER@$HOST '$*'"
+    ssh $SSH_OPTS $OPT_USER@$HOST "$*"
+}
+
+#
+# Run a command on the remote host but do not log it
+#
+raw_ssh()
+{
+    ssh $SSH_OPTS $OPT_USER@$HOST "$*"
+}
+
+#
+# Debug output
+#
+dbg()
+{
+    if [ $OPT_DEBUG -ne 0 ] # {
+    then
+        echo "$PROG: $* "
+    fi # }
+}
+
+#
+# Log output
+#
+log()
+{
+    if [ $OPT_LOG_TO_CONSOLE -eq 1 ]
+    then
+        echo "$PROG: $* "
+    fi # }
+}
+
+#
+# Called on a fatal error
+#
+die()
+{
+    echo "$PROG: ERROR *** $*"
+    exit 1
+}
+
+#
+# Parse the end user args
+#
+getargs()
+{
+    while : # {
+    do
+	if [ "$1" = "" ] # {
+	then
+	    break
+	fi # }
+	
+	case "$1" in # {
+        -q|-quiet|--quiet)
+            OPT_LOG_TO_CONSOLE=0;
+            ;;
+        -d|-debug|--debug)
+            OPT_DEBUG=1;
+            ;;
+        -t*)
+            shift
+            OPT_THREADS=$1;
+            ;;
+        -u*)
+            shift
+            HOST=$1;
+            ;;
+        -h|-help|--help)
+            usage
+            exit 1
+            ;;
+        *)
+            break
+
+        esac # }
+
+	shift
+    done # }
+
+    if [ "$SOURCE" = "" ]
+    then
+        setenv SOURCE $1;
+        shift
+        if [ "$SOURCE" = "" ]
+        then
+            usage
+            die "You need to specify a source file"
+            exit 1
+        fi
+    fi
+
+    ARG=$1
+
+    if [ "$OPT_USER" = "" ]
+    then
+        OPT_USER=`expr $ARG : "\(.*\)@"`
+
+        if [ "$OPT_USER" = "" ]
+        then
+            OPT_USER=`whoami`
+        fi
+    fi
+
+    if [ "$HOST" = "" ]
+    then
+        HOST=`expr $ARG : "\(.*\):"`
+        HOST=`echo $HOST | sed 's/.*@//g'`
+
+        if [ "$HOST" = "" ]
+        then
+            setenv HOST $1;
+            shift
+            if [ "$HOST"  = "" ]
+            then
+                usage
+                die "You need to specify a DST host"
+                exit 1
+            fi
+        fi
+    fi
+
+    if [ "$DST" = "" ]
+    then
+        DST=`expr $ARG : ".*:\(.*\)"`
+
+        if [ "$DST" = "" ]
+        then
+            setenv DST $1;
+
+            shift
+            if [ "$DST"  = "" ]
+            then
+                usage
+                die "You need to specify a DST dir"
+                exit 1
+            fi
+        fi
+    fi
+}
+
+PFX=.segment.
+TMPDST=`mktemp`
+TMPDIR=`dirname $TMPDST`
+
+#
+# Read arguments from the user
+#
+getargs $*
+
+#
+# Split into chunks
+#
+if [ ! -s $SOURCE ]
+then
+    die "$SOURCE does not exist?"
+fi
+
+SIZE=`stat -c %s $SOURCE`
+if [ $SIZE -eq 0 ]
+then
+    /bin/ls -la $SOURCE
+    die "File size is 0. Is $SOURCE sane?"
+fi
+
+CHUNK_SIZE=`expr $SIZE / $OPT_THREADS`
+
+dbg "Split file into chunks of size $CHUNK_SIZE"
+
+split -b $CHUNK_SIZE $SOURCE ${SOURCE}${PFX}
+if [ $? -ne 0 ]
+then
+    die "split -b $CHUNK_SIZE $SOURCE ${SOURCE}${PFX} failed"
+fi
+
+LOC_CSUMS=`$SUM ${SOURCE}${PFX}* | sed 's/ .*//g'`
+REM_CSUMS=`raw_ssh "split -b $CHUNK_SIZE $DST ${TMPDST}${PFX}; $SUM ${TMPDST}${PFX}* | sed 's/ .*//g'"`
+
+wait
+
+INDEX=0
+for i in $LOC_CSUMS
+do
+    INDEX=`expr $INDEX + 1`
+    SUM_LOC[$INDEX]="$i"
+    dbg "Local chunk csum $i"
+done
+LOC_MAX=$INDEX
+
+INDEX=0
+for i in $REM_CSUMS
+do
+    INDEX=`expr $INDEX + 1`
+    SUM_REM[$INDEX]="$i"
+    dbg "Remote chunk csum $i"
+done
+REM_MAX=$INDEX
+
+if [ $REM_MAX -gt $LOC_MAX ]
+then
+    dbg "Local file split into $LOC_MAX chunks. Remote into $REM_MAX. Clean remote files."
+
+    #
+    # Too many files on the remote, clean them up. This is too hard to fix
+    # with the crappy split tool not being able to take -n and only having
+    # -b
+    #
+    remote_ssh "/bin/rm -f ${TMPDST}${PFX}*"
+fi
+
+dbg "Total local chunks : $LOC_MAX"
+dbg "Total remote chunks: $REM_MAX"
+
+#
+# Copy
+#
+dbg "Copy changed chunks"
+
+INDEX=0
+for SEG in ${SOURCE}${PFX}* 
+do
+    INDEX=`expr $INDEX + 1`
+
+    CSUM_1=${SUM_LOC[$INDEX]}
+    CSUM_2=${SUM_REM[$INDEX]}
+    SEG_NO=`echo $SEG | sed "s/.*$PFX//g"`
+
+    #
+    # If the checksum is the same, just move the segment
+    #
+    if [ "$CSUM_1" = "$CSUM_2" ]
+    then
+        continue
+    fi
+
+    #
+    # Else copy it
+    #
+    dbg "  scp $SCP_OPTS ${SEG} $OPT_USER@${HOST}:${TMPDST}${PFX}${SEG_NO} &"
+    scp $SCP_OPTS ${SEG} $OPT_USER@${HOST}:${TMPDST}${PFX}${SEG_NO} &
+done
+
+wait
+
+#
+# Join
+#
+dbg "Join remote chunks"
+
+if [ $OPT_DEBUG -ne 0 ] # {
+then
+    echo
+    echo Local chunks
+    wc -c ${SOURCE}${PFX}* 
+#    $SUM ${SOURCE}${PFX}* | sed 's/ .*//g'
+
+    echo
+    echo Remote chunks
+    remote_ssh "wc -c ${TMPDST}${PFX}*"
+#    remote_ssh "md5sum ${TMPDST}${PFX}*"
+    echo
+fi
+
+remote_ssh "cat ${TMPDST}${PFX}* > ${DST}; /bin/rm -f ${TMPDST}${PFX}*"
+
+#
+# Verify
+#
+dbg "Verify remote chunks"
+
+LOC_SUM=`$SUM ${SOURCE} | sed 's/ .*//g'`
+REM_SUM=`raw_ssh "$SUM $DST" | sed 's/ .*//g'`
+
+if [ "$LOC_SUM" != "$REM_SUM" ]
+then
+    die "Local checksum $LOC_SUM does not match remote $REM_SUM"
+fi
+
+if [ $OPT_LOG_TO_CONSOLE -eq 1 ]
+then
+    log "Checksums match:"
+    echo $REM_SUM | sed "s/^/$PROG:   Remote: /g"
+    echo $LOC_SUM | sed "s/^/$PROG:   Local:  /g"
+fi
+
+#
+# Cleanup
+#
+dbg "Clean"
+
+/bin/rm -f ${SOURCE}${PFX}*
