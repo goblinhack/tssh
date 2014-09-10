@@ -109,6 +109,7 @@ remote_ssh()
 {
     dbg "  ssh $SSH_OPTS $OPT_USER@$HOST '$*'"
     ssh $SSH_OPTS $OPT_USER@$HOST "$*"
+    sleep 1
 }
 
 #
