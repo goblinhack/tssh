@@ -5,7 +5,9 @@ Multi threaded ssh of a large file to a destination. Uses checksums for
 incremental speedups on subsequent copies.
 
   $ tssh [-t x] [-u user] src host dest
+
   $ tssh [-t x] [-u user] src host:dest
+
   $ tssh [-t x] [-u user] src user@host:dest
 
 Defaults to 10 threads. Options:
