@@ -4,11 +4,9 @@ tssh
 Multi threaded ssh of a large file to a destination. Uses checksums for 
 incremental speedups on subsequent copies.
 
-  $ tssh [-t x] [-u user] src host dest
+Example:
 
-  $ tssh [-t x] [-u user] src host:dest
-
-  $ tssh [-t x] [-u user] src user@host:dest
+  $ tssh -t 20 -d -v bigfile user@farawayhost:/path/bigfile
 
 Defaults to 10 threads. Options:
 
@@ -36,6 +34,3 @@ Defaults to 10 threads. Options:
       --verify
       -v  ... Check results
 
-Example:
-
-  $ tssh -t 20 -d -v file admin@rtp-xdm-104:/auto/rtp-core-tftpboot/nmcgill/file
